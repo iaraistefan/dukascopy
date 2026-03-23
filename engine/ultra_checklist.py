@@ -1,91 +1,87 @@
-# engine/ultrachecklist.py
-# Checklist Ultra Premium - ACCURACY FIRST
-# Fix: C13 NOU - FPT si RSI trebuie aliniate
-# Fix: C12 prag dinamic (major=0.5, crosses=1.0)
-
 from loguru import logger
+from config import (
+    MIN_FPT_PROB, MIN_FINAL_SCORE, MIN_SR_DISTANCE_ATR,
+    ATR_RATIO_MIN, ATR_RATIO_MAX, MIN_CANDLES_REQUIRED,
+    HURST_MOMENTUM_THRESHOLD, HURST_MR_THRESHOLD,
+    MIN_STABILITY_SCORE, MAX_SPREAD_ATR_RATIO,
+)
 
-MAJOR_PAIRS = {
-    "EURUSD", "GBPUSD", "USDJPY", "USDCHF",
-    "AUDUSD", "USDCAD", "NZDUSD"
-}
 
-def is_ultra_premium_signal(candidate: dict) -> tuple[bool, str]:
-    symbol       = candidate.get("symbol", "")
-    direction    = candidate.get("direction", "")
-    prob         = candidate.get("prob", 0.0)
-    dist_atr     = candidate.get("dist_atr", 0.0)
-    hurst        = candidate.get("hurst", 0.0)
-    drift_dir    = candidate.get("drift_dir", "flat")
-    atr_ratio    = candidate.get("atr_ratio", 1.0)
-    mu           = candidate.get("mu", 0.0)
-    sigma        = candidate.get("sigma", 1.0)
-    stability    = candidate.get("stability_score", 0.0)
-    rsi_conf     = candidate.get("rsi_confirmation", 0.0)
-    spread_atr   = candidate.get("spread_atr_ratio", 0.0)
-    expiry_score = candidate.get("expiry_score", 0.0)
-    is_real      = candidate.get("is_real_data", True)
+def is_ultra_premium_signal(
+    n_candles: int,
+    is_real_data: bool,
+    fetch_latency: float,
+    hurst_value: float,
+    regime: str,
+    regime_compatible: bool,
+    regime_reason: str,
+    fpt_prob: float,
+    dist_atr: float,
+    expiry_score: float,
+    atr_ratio: float,
+    stability_score: float,
+    spread_atr_ratio: float,
+    session_allowed: bool,
+    session_reason: str,
+    symbol_allowed: bool,
+    symbol_pf_reason: str,
+    cooldown_ok: bool,
+    is_rank_1: bool,
+    symbol: str = "",
+) -> tuple[bool, list[str]]:
 
-    # C1 — Date reale
-    if not is_real:
-        return False, "C1_not_real_data"
+    fails = []
 
-    # C2 — FPT prob minim
-    if prob < 0.70:
-        return False, f"C2_prob{prob:.3f}<0.70"
+    if not is_real_data:
+        fails.append("C1: date_mock")
 
-    # C3 — Distanta fata de S/R (nu intra IN S/R)
-    if dist_atr < 0.50:
-        return False, f"C3_dist{dist_atr:.2f}ATR<0.50"
+    if n_candles < MIN_CANDLES_REQUIRED:
+        fails.append(f"C2: candles={n_candles}<{MIN_CANDLES_REQUIRED}")
 
-    # C4 — Hurst confirma regimul
-    if hurst < 0.65:
-        return False, f"C4_hurst{hurst:.3f}<0.65"
+    if not regime_compatible:
+        fails.append(f"C3: {regime_reason}")
 
-    # C5 — Drift aliniat cu directia semnalului
-    if direction == "CALL" and drift_dir == "down":
-        return False, "C5_CALL_contra_drift_DOWN"
-    if direction == "PUT" and drift_dir == "up":
-        return False, "C5_PUT_contra_drift_UP"
+    if regime == "random":
+        fails.append(f"C4: regim_random_H={hurst_value:.3f}")
 
-    # C6 — ATR ratio: piata activa dar nu exploziva
-    if atr_ratio < 0.6 or atr_ratio > 2.5:
-        return False, f"C6_atr_ratio{atr_ratio:.2f}_out_of_range"
+    if dist_atr < MIN_SR_DISTANCE_ATR:
+        fails.append(f"C5: dist={dist_atr:.2f}<{MIN_SR_DISTANCE_ATR}")
 
-    # C7 — Sigma nu e zero
-    if sigma < 1e-8:
-        return False, "C7_sigma_zero"
+    if fpt_prob < MIN_FPT_PROB:
+        fails.append(f"C6: prob={fpt_prob:.3f}<{MIN_FPT_PROB}")
 
-    # C8 — Mu are semn consistent cu directia
-    if direction == "CALL" and mu < 0:
-        return False, f"C8_CALL_mu_negativ{mu:.6f}"
-    if direction == "PUT" and mu > 0:
-        return False, f"C8_PUT_mu_pozitiv{mu:.6f}"
+    if expiry_score < MIN_FINAL_SCORE:
+        fails.append(f"C7: score={expiry_score:.4f}<{MIN_FINAL_SCORE}")
 
-    # C9 — Stability score
-    if stability < 0.35:
-        return False, f"C9_stability{stability:.3f}<0.35"
+    if atr_ratio < ATR_RATIO_MIN or atr_ratio > ATR_RATIO_MAX:
+        fails.append(f"C8: atr_ratio={atr_ratio:.2f}")
 
-    # C10 — Expiry score minim
-    if expiry_score < 0.28:
-        return False, f"C10_expiry_score{expiry_score:.4f}<0.28"
+    if not cooldown_ok:
+        fails.append("C9: cooldown_activ")
 
-    # C11 — Distanta maxima fata de S/R
-    if dist_atr > 2.0:
-        return False, f"C11_dist{dist_atr:.2f}ATR>2.0"
+    if not is_rank_1:
+        fails.append("C10: nu_rank_1")
 
-    # C12 — Spread/ATR dinamic: major=0.5, crosses=1.0
-    spread_limit = 0.5 if symbol in MAJOR_PAIRS else 1.0
-    if spread_atr > spread_limit:
-        return False, f"C12_spread_atr{spread_atr:.3f}>{spread_limit}"
+    if stability_score < MIN_STABILITY_SCORE:
+        fails.append(f"C11: stability={stability_score:.3f}<{MIN_STABILITY_SCORE}")
 
-    # C13 NOU — FPT si RSI aliniate (nu in conflict)
-    if rsi_conf < 0.50:
-        return False, f"C13_rsi_conf{rsi_conf:.3f}<0.50_conflict_FPT"
+    if spread_atr_ratio > MAX_SPREAD_ATR_RATIO:
+        fails.append(f"C12: spread_atr={spread_atr_ratio:.3f}>{MAX_SPREAD_ATR_RATIO}")
 
-    logger.success(
-        f"{symbol} Checklist PASS 13/13 | "
-        f"P={prob:.3f} Stab={stability:.3f} RSI={rsi_conf:.3f} "
-        f"Dist={dist_atr:.2f}ATR Spread={spread_atr:.3f}"
-    )
-    return True, "OK"
+    if not session_allowed:
+        fails.append(f"C13: {session_reason}")
+
+    if not symbol_allowed:
+        fails.append(f"C14: {symbol_pf_reason}")
+
+    passed = len(fails) == 0
+
+    if not passed:
+        logger.debug(f"[{symbol}] Checklist FAIL ({len(fails)}): {' | '.join(fails[:3])}")
+    else:
+        logger.info(
+            f"[{symbol}] Checklist PASS (14/14) P={fpt_prob:.3f} "
+            f"D={dist_atr:.2f} S={expiry_score:.4f} Stab={stability_score:.3f}"
+        )
+
+    return passed, fails
