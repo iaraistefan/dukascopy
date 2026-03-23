@@ -4,11 +4,13 @@ import requests
 import pandas as pd
 from loguru import logger
 
-# Ia cheia din .env: TWELVEDATA_API_KEY=cheia_ta
 API_KEY  = os.getenv("TWELVEDATA_API_KEY", "demo")
 BASE_URL = "https://api.twelvedata.com/time_series"
 
-# Format Twelve Data pentru Forex
+# Rate limiter: max 8 req/min -> 1 req la 8 secunde
+_last_call_time = 0.0
+RATE_LIMIT_INTERVAL = 8.0  # secunde intre cereri
+
 SYMBOL_MAP = {
     "EURUSD": "EUR/USD", "GBPUSD": "GBP/USD", "USDJPY": "USD/JPY",
     "USDCHF": "USD/CHF", "AUDUSD": "AUD/USD", "USDCAD": "USD/CAD",
@@ -21,14 +23,24 @@ SYMBOL_MAP = {
 }
 
 
+def _rate_limit():
+    global _last_call_time
+    elapsed = time.time() - _last_call_time
+    if elapsed < RATE_LIMIT_INTERVAL:
+        time.sleep(RATE_LIMIT_INTERVAL - elapsed)
+    _last_call_time = time.time()
+
+
 def get_ohlcv(symbol: str, n_candles: int = 120):
+    _rate_limit()
+
     instrument = SYMBOL_MAP.get(symbol, symbol)
     params = {
-        "symbol":    instrument,
-        "interval":  "1min",
+        "symbol":     instrument,
+        "interval":   "1min",
         "outputsize": min(n_candles, 120),
-        "apikey":    API_KEY,
-        "format":    "JSON",
+        "apikey":     API_KEY,
+        "format":     "JSON",
     }
 
     t0 = time.time()
@@ -37,34 +49,26 @@ def get_ohlcv(symbol: str, n_candles: int = 120):
         latency = time.time() - t0
 
         if resp.status_code != 200:
-            logger.warning(f"{symbol} TwelveData HTTP {resp.status_code}. SKIP.")
+            logger.warning(f"{symbol} HTTP {resp.status_code}. SKIP.")
             return pd.DataFrame(), latency, False
 
         data = resp.json()
 
-        # Rate limit atins
         if data.get("status") == "error":
-            msg = data.get("message", "unknown")
-            logger.warning(f"{symbol} TwelveData eroare: {msg}. SKIP.")
+            logger.warning(f"{symbol} TwelveData: {data.get('message','?')}. SKIP.")
             return pd.DataFrame(), latency, False
 
         values = data.get("values", [])
         if len(values) < 10:
-            logger.warning(f"{symbol} TwelveData: {len(values)} bare. SKIP.")
+            logger.warning(f"{symbol} date insuficiente ({len(values)} bare). SKIP.")
             return pd.DataFrame(), latency, False
 
         df = pd.DataFrame(values)
         df["datetime"] = pd.to_datetime(df["datetime"])
-        df = df.set_index("datetime")
-        for col in ["open", "high", "low", "close", "volume"]:
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors="coerce")
+        df = df.set_index("datetime").sort_index()
+        for col in ["open", "high", "low", "close"]:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
         df = df[["open", "high", "low", "close"]].dropna()
-        df = df.sort_index()  # ordine cronologica
-
-        if latency > 5.0:
-            logger.warning(f"{symbol} Latency={latency:.1f}s >5.0s. SKIP.")
-            return pd.DataFrame(), latency, False
 
         logger.debug(f"{symbol} {len(df)} lumânări M1 | Latency={latency:.2f}s")
         return df, latency, True
