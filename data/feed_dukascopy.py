@@ -5,6 +5,17 @@ from loguru import logger
 
 DUKA_URL = "https://freeserv.dukascopy.com/2.0/index.php"
 
+HEADERS = {
+    "User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                       "AppleWebKit/537.36 (KHTML, like Gecko) "
+                       "Chrome/122.0.0.0 Safari/537.36",
+    "Accept":          "application/json, text/javascript, */*; q=0.01",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer":         "https://www.dukascopy.com/trading-tools/widgets/charts/online_chart",
+    "Origin":          "https://www.dukascopy.com",
+    "Connection":      "keep-alive",
+}
+
 SYMBOL_MAP = {
     "EURUSD": "EUR/USD", "GBPUSD": "GBP/USD", "USDJPY": "USD/JPY",
     "USDCHF": "USD/CHF", "AUDUSD": "AUD/USD", "USDCAD": "USD/CAD",
@@ -15,6 +26,9 @@ SYMBOL_MAP = {
     "AUDJPY": "AUD/JPY", "AUDNZD": "AUD/NZD", "AUDCAD": "AUD/CAD",
     "NZDJPY": "NZD/JPY", "CADJPY": "CAD/JPY",
 }
+
+SESSION = requests.Session()
+SESSION.headers.update(HEADERS)
 
 
 def get_ohlcv(symbol: str, n_candles: int = 120):
@@ -32,8 +46,12 @@ def get_ohlcv(symbol: str, n_candles: int = 120):
 
     t0 = time.time()
     try:
-        resp = requests.get(DUKA_URL, params=params, timeout=5)
+        resp = SESSION.get(DUKA_URL, params=params, timeout=8)
         latency = time.time() - t0
+
+        if resp.status_code == 403:
+            logger.warning(f"{symbol} HTTP 403 (IP blocat). SKIP.")
+            return pd.DataFrame(), latency, False
 
         if resp.status_code != 200 or not resp.text.strip():
             logger.warning(f"{symbol} HTTP {resp.status_code}. SKIP.")
@@ -55,7 +73,7 @@ def get_ohlcv(symbol: str, n_candles: int = 120):
         df = df.dropna()
 
         if latency > 5.0:
-            logger.warning(f"{symbol} Fetch latency={latency:.1f}s >5.0s. SKIP.")
+            logger.warning(f"{symbol} Latency={latency:.1f}s >5.0s. SKIP.")
             return pd.DataFrame(), latency, False
 
         logger.debug(f"{symbol} {len(df)} lumânări M1 | Latency={latency:.2f}s")
