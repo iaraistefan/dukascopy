@@ -1,86 +1,113 @@
-import time, os, requests, pandas as pd
+import time, struct, zlib, requests
+import pandas as pd
+import numpy as np
+from datetime import datetime, timezone
 from loguru import logger
 
-API_KEY  = os.getenv("TWELVEDATA_API_KEY", "demo")
-BASE_URL = "https://api.twelvedata.com/time_series"
-
-SYMBOL_MAP = {
-    "EURUSD":"EUR/USD","GBPUSD":"GBP/USD","USDJPY":"USD/JPY","USDCHF":"USD/CHF",
-    "AUDUSD":"AUD/USD","USDCAD":"USD/CAD","NZDUSD":"NZD/USD","EURGBP":"EUR/GBP",
-    "EURJPY":"EUR/JPY","EURAUD":"EUR/AUD","EURCAD":"EUR/CAD","EURNZD":"EUR/NZD",
-    "EURCHF":"EUR/CHF","GBPJPY":"GBP/JPY","GBPAUD":"GBP/AUD","GBPCAD":"GBP/CAD",
-    "GBPNZD":"GBP/NZD","GBPCHF":"GBP/CHF",
-}
-
-BATCHES = [
-    ["EURUSD","GBPUSD","USDJPY","USDCHF","AUDUSD","USDCAD"],
-    ["NZDUSD","EURGBP","EURJPY","EURAUD","EURCAD","EURNZD"],
-    ["EURCHF","GBPJPY","GBPAUD","GBPCAD","GBPNZD","GBPCHF"],
-]
-
 _cache: dict = {}
-_last_batch_time: float = 0.0
-CACHE_TTL = 50  # secunde
+_last_fetch: dict = {}
+CACHE_TTL = 55
 
-def _fetch_all_batches(n_candles: int = 120):
-    global _last_batch_time
-    if time.time() - _last_batch_time < CACHE_TTL:
-        return
+def _fetch_dukascopy_direct(symbol: str, n_candles: int = 120) -> pd.DataFrame:
+    """Fetch direct din Dukascopy HTTP fara librarie wrapper."""
+    now_utc = datetime.now(timezone.utc)
+    hour_ts = int(now_utc.replace(minute=0, second=0, microsecond=0).timestamp()) * 1000
 
-    for i, batch in enumerate(BATCHES):
-        if i > 0:
-            time.sleep(2)  # pauza intre batch-uri
+    url = (
+        f"https://datafeed.dukascopy.com/datafeed/"
+        f"{symbol.upper()}/{now_utc.year}/"
+        f"{now_utc.month - 1:02d}/{now_utc.day:02d}/"
+        f"{now_utc.hour:02d}h_ticks.bi5"
+    )
 
-        symbols_td = ",".join(SYMBOL_MAP[s] for s in batch)
-        params = {
-            "symbol": symbols_td,
-            "interval": "1min",
-            "outputsize": min(n_candles, 120),
-            "apikey": API_KEY,
-            "format": "JSON",
-        }
-        try:
-            resp = requests.get(BASE_URL, params=params, timeout=12)
-            if resp.status_code != 200:
-                logger.warning(f"Batch {i+1} HTTP {resp.status_code}. SKIP.")
-                continue
+    try:
+        resp = requests.get(url, timeout=5, headers={"User-Agent": "Mozilla/5.0"})
+        if resp.status_code != 200 or len(resp.content) < 10:
+            return pd.DataFrame()
 
-            data = resp.json()
-            if data.get("status") == "error":
-                logger.warning(f"Batch {i+1} eroare API: {data.get('message','?')}")
-                continue
+        raw = zlib.decompress(resp.content, -zlib.MAX_WBITS)
+        ticks = []
+        for i in range(0, len(raw) - 19, 20):
+            chunk = raw[i:i+20]
+            if len(chunk) < 20:
+                break
+            ms, ask, bid, avol, bvol = struct.unpack(">IIIff", chunk)
+            ts = hour_ts + ms
+            price = bid / 100000.0
+            ticks.append((ts, price))
 
-            for symbol in batch:
-                td_key = SYMBOL_MAP[symbol]
-                sym_data = data.get(td_key, {})
-                if not sym_data or sym_data.get("status") == "error":
-                    continue
-                values = sym_data.get("values", [])
-                if len(values) < 10:
-                    continue
-                df = pd.DataFrame(values)
-                df["datetime"] = pd.to_datetime(df["datetime"])
-                df = df.set_index("datetime").sort_index()
-                for col in ["open","high","low","close"]:
-                    df[col] = pd.to_numeric(df[col], errors="coerce")
-                df = df[["open","high","low","close"]].dropna()
-                _cache[symbol] = (df, time.time())
-                logger.debug(f"{symbol} {len(df)} lumânări M1 din batch {i+1}")
+        if not ticks:
+            return pd.DataFrame()
 
-        except Exception as e:
-            logger.error(f"Batch {i+1} eroare: {e}")
+        df_ticks = pd.DataFrame(ticks, columns=["ts", "close"])
+        df_ticks["ts"] = pd.to_datetime(df_ticks["ts"], unit="ms", utc=True)
+        df_ticks = df_ticks.set_index("ts")
 
-    _last_batch_time = time.time()
+        # Resample ticks -> OHLC M1
+        ohlc = df_ticks["close"].resample("1min").ohlc().dropna()
+        return ohlc.tail(n_candles)
+
+    except Exception as e:
+        logger.warning(f"{symbol} Dukascopy direct: {e}")
+        return pd.DataFrame()
+
 
 def get_ohlcv(symbol: str, n_candles: int = 120):
-    _fetch_all_batches(n_candles)
-    cached = _cache.get(symbol)
-    if cached is None:
-        logger.warning(f"{symbol} nu e in cache. SKIP.")
-        return pd.DataFrame(), 0.0, False
-    df, fetched_at = cached
-    latency = time.time() - fetched_at
+    now = time.time()
+    if now - _last_fetch.get(symbol, 0) < CACHE_TTL and symbol in _cache:
+        df, fetched_at = _cache[symbol]
+        age = now - fetched_at
+        logger.debug(f"{symbol} din cache | Age={age:.0f}s | {len(df)} bare")
+        return df.copy(), age, True
+
+    t0 = time.time()
+    df = _fetch_dukascopy_direct(symbol, n_candles)
+    latency = time.time() - t0
+
     if len(df) < 10:
+        # Fallback: ora precedenta
+        logger.warning(f"{symbol} ora curenta goala, incerc ora precedenta...")
+        df = _fetch_dukascopy_prev_hour(symbol, n_candles)
+
+    if len(df) < 10:
+        logger.warning(f"{symbol} Dukascopy: date insuficiente. SKIP.")
         return pd.DataFrame(), latency, False
-    logger.debug(f"{symbol} din cache | Varsta={latency:.0f}s | {len(df)} bare")
-    return df.iloc[-n_candles:].copy(), latency, True
+
+    _cache[symbol] = (df, time.time())
+    _last_fetch[symbol] = now
+    logger.debug(f"{symbol} {len(df)} lumânări M1 | Latency={latency:.2f}s")
+    return df.copy(), latency, True
+
+
+def _fetch_dukascopy_prev_hour(symbol: str, n_candles: int) -> pd.DataFrame:
+    """Fallback: ora anterioara."""
+    from datetime import timedelta
+    now_utc = datetime.now(timezone.utc) - timedelta(hours=1)
+    hour_ts = int(now_utc.replace(minute=0, second=0, microsecond=0).timestamp()) * 1000
+    url = (
+        f"https://datafeed.dukascopy.com/datafeed/"
+        f"{symbol.upper()}/{now_utc.year}/"
+        f"{now_utc.month - 1:02d}/{now_utc.day:02d}/"
+        f"{now_utc.hour:02d}h_ticks.bi5"
+    )
+    try:
+        resp = requests.get(url, timeout=5, headers={"User-Agent": "Mozilla/5.0"})
+        if resp.status_code != 200 or len(resp.content) < 10:
+            return pd.DataFrame()
+        raw = zlib.decompress(resp.content, -zlib.MAX_WBITS)
+        ticks = []
+        for i in range(0, len(raw) - 19, 20):
+            chunk = raw[i:i+20]
+            if len(chunk) < 20:
+                break
+            ms, ask, bid, avol, bvol = struct.unpack(">IIIff", chunk)
+            price = bid / 100000.0
+            ticks.append((hour_ts + ms, price))
+        if not ticks:
+            return pd.DataFrame()
+        df_ticks = pd.DataFrame(ticks, columns=["ts", "close"])
+        df_ticks["ts"] = pd.to_datetime(df_ticks["ts"], unit="ms", utc=True)
+        ohlc = df_ticks.set_index("ts")["close"].resample("1min").ohlc().dropna()
+        return ohlc.tail(n_candles)
+    except Exception:
+        return pd.DataFrame()
