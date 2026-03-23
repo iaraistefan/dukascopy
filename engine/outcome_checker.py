@@ -1,13 +1,8 @@
-# engine/outcome_checker.py
-# Verificare automata WIN/LOSS + scriere CSV real
-# Fix: salveaza outcomes in outcomes_real.csv cu toate metricile
-
 import asyncio
 import csv
 import os
 from datetime import datetime, timezone
 from loguru import logger
-from engine.performancetracker import PerformanceTracker
 
 
 CSV_PATH = "outcomes_real.csv"
@@ -35,10 +30,10 @@ def _write_outcome_row(row: dict):
 
 class OutcomeChecker:
 
-    def __init__(self, tracker: PerformanceTracker):
+    def __init__(self, tracker=None):
         self.tracker = tracker
-        self.pending: list[dict] = []
-        self.results: list[dict] = []
+        self.pending = []
+        self.results = []
         self._stats = {"wins": 0, "losses": 0, "unknown": 0, "total": 0}
 
     async def schedule_check(self, signal: dict, entry_price: float):
@@ -67,7 +62,7 @@ class OutcomeChecker:
         self.pending.append(pending)
 
         logger.info(
-            f"{symbol} Outcome check programat in {delta_min}min+10s | "
+            f"{symbol} Outcome programat in {delta_min}min+10s | "
             f"Entry={entry_price:.5f}"
         )
         asyncio.create_task(self._check_after_delay(pending))
@@ -75,7 +70,7 @@ class OutcomeChecker:
     async def _check_after_delay(self, pending: dict):
         await asyncio.sleep(pending["wait_sec"])
 
-        symbol    = pending["symbol"]
+        symbol   = pending["symbol"]
         direction = pending["direction"]
         entry_px  = pending["entry_price"]
 
@@ -88,7 +83,7 @@ class OutcomeChecker:
                 return
             exit_price = float(df["close"].iloc[-1])
         except Exception as e:
-            logger.error(f"{symbol} Outcome check eroare: {e}")
+            logger.error(f"{symbol} Outcome eroare: {e}")
             self._record(pending, None, None, "ERROR")
             return
 
@@ -97,13 +92,19 @@ class OutcomeChecker:
         status = "WIN" if win else "LOSS"
         emoji  = "✅" if win else "❌"
 
-        self.tracker.record_result(symbol, win)
+        if self.tracker:
+            try:
+                self.tracker.record_result(symbol, win)
+            except Exception:
+                pass
+
         self._record(pending, exit_price, win, status)
 
         logger.info(
             f"{symbol} {emoji} {status} | {direction} | "
             f"Entry={entry_px:.5f} Exit={exit_price:.5f} Diff={pips:.5f} | "
-            f"WR={self.win_rate:.1%} ({self._stats['wins']}W/{self._stats['losses']}L)"
+            f"WR={self.win_rate:.1%} "
+            f"({self._stats['wins']}W/{self._stats['losses']}L)"
         )
 
     def _record(self, pending: dict, exit_price, win, status: str):
@@ -111,22 +112,22 @@ class OutcomeChecker:
         pips = abs((exit_price or 0) - pending["entry_price"])
 
         row = {
-            "timestamp_entry":  pending["entry_time"],
-            "timestamp_check":  now,
-            "symbol":           pending["symbol"],
-            "direction":        pending["direction"],
-            "expiry_min":       pending["delta_min"],
-            "entry_price":      f"{pending['entry_price']:.5f}",
-            "exit_price":       f"{exit_price:.5f}" if exit_price else "",
-            "pips_diff":        f"{pips:.5f}",
-            "result":           status,
-            "fpt_prob":         f"{pending['fpt_prob']:.4f}",
-            "stability":        f"{pending['stability']:.4f}",
-            "rsi_conf":         f"{pending['rsi_conf']:.4f}",
-            "dist_atr":         f"{pending['dist_atr']:.4f}",
-            "hurst":            f"{pending['hurst']:.4f}",
-            "spread_atr":       f"{pending['spread_atr']:.4f}",
-            "expiry_score":     f"{pending['expiry_score']:.4f}",
+            "timestamp_entry": pending["entry_time"],
+            "timestamp_check": now,
+            "symbol":          pending["symbol"],
+            "direction":       pending["direction"],
+            "expiry_min":      pending["delta_min"],
+            "entry_price":     f"{pending['entry_price']:.5f}",
+            "exit_price":      f"{exit_price:.5f}" if exit_price else "",
+            "pips_diff":       f"{pips:.5f}",
+            "result":          status,
+            "fpt_prob":        f"{pending['fpt_prob']:.4f}",
+            "stability":       f"{pending['stability']:.4f}",
+            "rsi_conf":        f"{pending['rsi_conf']:.4f}",
+            "dist_atr":        f"{pending['dist_atr']:.4f}",
+            "hurst":           f"{pending['hurst']:.4f}",
+            "spread_atr":      f"{pending['spread_atr']:.4f}",
+            "expiry_score":    f"{pending['expiry_score']:.4f}",
         }
 
         self.results.append(row)
@@ -154,13 +155,13 @@ class OutcomeChecker:
     def stats(self) -> dict:
         return {
             **self._stats,
-            "win_rate":          f"{self.win_rate:.1%}",
-            "pending":           len(self.pending),
-            "break_even":        "54.05%",
-            "above_break_even":  self.win_rate >= 0.5405,
+            "win_rate":         f"{self.win_rate:.1%}",
+            "pending":          len(self.pending),
+            "break_even":       "54.05%",
+            "above_break_even": self.win_rate >= 0.5405,
         }
 
-    def get_last_results(self, n: int = 20) -> list[dict]:
+    def get_last_results(self, n: int = 20) -> list:
         return self.results[-n:]
 
     def format_result_message(self, result: dict) -> str:
