@@ -4,43 +4,38 @@ import requests
 import pandas as pd
 from loguru import logger
 
-API_KEY  = os.getenv("TWELVEDATA_API_KEY", "demo")
-BASE_URL = "https://api.twelvedata.com/time_series"
-
-# Rate limiter: max 8 req/min -> 1 req la 8 secunde
-_last_call_time = 0.0
-RATE_LIMIT_INTERVAL = 8.0  # secunde intre cereri
+API_KEY  = os.getenv("FINNHUB_API_KEY", "")
+BASE_URL = "https://finnhub.io/api/v1/forex/candle"
 
 SYMBOL_MAP = {
-    "EURUSD": "EUR/USD", "GBPUSD": "GBP/USD", "USDJPY": "USD/JPY",
-    "USDCHF": "USD/CHF", "AUDUSD": "AUD/USD", "USDCAD": "USD/CAD",
-    "NZDUSD": "NZD/USD", "EURGBP": "EUR/GBP", "EURJPY": "EUR/JPY",
-    "EURAUD": "EUR/AUD", "EURCAD": "EUR/CAD", "EURNZD": "EUR/NZD",
-    "EURCHF": "EUR/CHF", "GBPJPY": "GBP/JPY", "GBPAUD": "GBP/AUD",
-    "GBPCAD": "GBP/CAD", "GBPNZD": "GBP/NZD", "GBPCHF": "GBP/CHF",
-    "AUDJPY": "AUD/JPY", "AUDNZD": "AUD/NZD", "AUDCAD": "AUD/CAD",
-    "NZDJPY": "NZD/JPY", "CADJPY": "CAD/JPY",
+    "EURUSD": "OANDA:EUR_USD", "GBPUSD": "OANDA:GBP_USD",
+    "USDJPY": "OANDA:USD_JPY", "USDCHF": "OANDA:USD_CHF",
+    "AUDUSD": "OANDA:AUD_USD", "USDCAD": "OANDA:USD_CAD",
+    "NZDUSD": "OANDA:NZD_USD", "EURGBP": "OANDA:EUR_GBP",
+    "EURJPY": "OANDA:EUR_JPY", "EURAUD": "OANDA:EUR_AUD",
+    "EURCAD": "OANDA:EUR_CAD", "EURNZD": "OANDA:EUR_NZD",
+    "EURCHF": "OANDA:EUR_CHF", "GBPJPY": "OANDA:GBP_JPY",
+    "GBPAUD": "OANDA:GBP_AUD", "GBPCAD": "OANDA:GBP_CAD",
+    "GBPNZD": "OANDA:GBP_NZD", "GBPCHF": "OANDA:GBP_CHF",
+    "AUDJPY": "OANDA:AUD_JPY", "AUDNZD": "OANDA:AUD_NZD",
+    "AUDCAD": "OANDA:AUD_CAD", "NZDJPY": "OANDA:NZD_JPY",
+    "CADJPY": "OANDA:CAD_JPY",
 }
 
 
-def _rate_limit():
-    global _last_call_time
-    elapsed = time.time() - _last_call_time
-    if elapsed < RATE_LIMIT_INTERVAL:
-        time.sleep(RATE_LIMIT_INTERVAL - elapsed)
-    _last_call_time = time.time()
-
-
 def get_ohlcv(symbol: str, n_candles: int = 120):
-    _rate_limit()
+    finnhub_symbol = SYMBOL_MAP.get(symbol, f"OANDA:{symbol[:3]}_{symbol[3:]}")
 
-    instrument = SYMBOL_MAP.get(symbol, symbol)
+    # Interval: ultimele n_candles minute
+    t_to   = int(time.time())
+    t_from = t_to - (n_candles * 60)
+
     params = {
-        "symbol":     instrument,
-        "interval":   "1min",
-        "outputsize": min(n_candles, 120),
-        "apikey":     API_KEY,
-        "format":     "JSON",
+        "symbol":     finnhub_symbol,
+        "resolution": "1",         # 1 minut
+        "from":       t_from,
+        "to":         t_to,
+        "token":      API_KEY,
     }
 
     t0 = time.time()
@@ -49,26 +44,32 @@ def get_ohlcv(symbol: str, n_candles: int = 120):
         latency = time.time() - t0
 
         if resp.status_code != 200:
-            logger.warning(f"{symbol} HTTP {resp.status_code}. SKIP.")
+            logger.warning(f"{symbol} Finnhub HTTP {resp.status_code}. SKIP.")
             return pd.DataFrame(), latency, False
 
         data = resp.json()
 
-        if data.get("status") == "error":
-            logger.warning(f"{symbol} TwelveData: {data.get('message','?')}. SKIP.")
+        if data.get("s") == "no_data" or not data.get("c"):
+            logger.warning(f"{symbol} Finnhub: no_data. SKIP.")
             return pd.DataFrame(), latency, False
 
-        values = data.get("values", [])
-        if len(values) < 10:
-            logger.warning(f"{symbol} date insuficiente ({len(values)} bare). SKIP.")
+        if data.get("s") == "error":
+            logger.warning(f"{symbol} Finnhub eroare: {data}. SKIP.")
             return pd.DataFrame(), latency, False
 
-        df = pd.DataFrame(values)
-        df["datetime"] = pd.to_datetime(df["datetime"])
-        df = df.set_index("datetime").sort_index()
-        for col in ["open", "high", "low", "close"]:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-        df = df[["open", "high", "low", "close"]].dropna()
+        df = pd.DataFrame({
+            "open":   data["o"],
+            "high":   data["h"],
+            "low":    data["l"],
+            "close":  data["c"],
+            "volume": data.get("v", [0] * len(data["c"])),
+        }, index=pd.to_datetime(data["t"], unit="s"))
+
+        df = df.sort_index().dropna()
+
+        if len(df) < 10:
+            logger.warning(f"{symbol} Finnhub: {len(df)} bare insuficiente. SKIP.")
+            return pd.DataFrame(), latency, False
 
         logger.debug(f"{symbol} {len(df)} lumânări M1 | Latency={latency:.2f}s")
         return df, latency, True
