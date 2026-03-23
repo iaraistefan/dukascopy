@@ -1,5 +1,5 @@
 """
-config.py — CONFIGURARE COMPLETA Forex Radar v3
+config.py — CONFIGURARE COMPLETA Forex Radar v4
 """
 import os
 from dotenv import load_dotenv
@@ -97,3 +97,8 @@ PF_MIN_SIGNALS_FOR_EVAL = 10
 PF_SUSPEND_THRESHOLD    = 1.05
 PF_RESUME_THRESHOLD     = 1.20
 PF_LOOKBACK_SIGNALS     = 50
+
+# ── Lead Time ────────────────────────────────────────────────────────────────
+# Semnalul este trimis cu LEAD_TIME_SEC secunde INAINTE de intrare.
+# La 90 sec: "Intrare la 20:15:30 UTC" — ai timp sa deschizi pozitia.
+LEAD_TIME_SEC = 90
