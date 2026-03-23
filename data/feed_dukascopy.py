@@ -1,4 +1,7 @@
-import time, struct, lzma, requests
+import time
+import struct
+import lzma
+import requests
 import pandas as pd
 from datetime import datetime, timezone, timedelta
 from loguru import logger
@@ -14,14 +17,17 @@ SYMBOL_MAP_DUKA = {
     "EURAUD": "EURAUD", "EURCAD": "EURCAD", "EURNZD": "EURNZD",
     "EURCHF": "EURCHF", "GBPJPY": "GBPJPY", "GBPAUD": "GBPAUD",
     "GBPCAD": "GBPCAD", "GBPNZD": "GBPNZD", "GBPCHF": "GBPCHF",
+    "AUDJPY": "AUDJPY", "AUDNZD": "AUDNZD", "AUDCAD": "AUDCAD",
+    "NZDJPY": "NZDJPY", "CADJPY": "CADJPY",
 }
 
-# Simboluri cu 3 zecimale (JPY pairs): impartire la 1000 in loc de 100000
-JPY_PAIRS = {"USDJPY", "EURJPY", "GBPJPY", "AUDJPY", "CADJPY", "NZDJPY"}
+JPY_PAIRS = {
+    "USDJPY", "EURJPY", "GBPJPY", "AUDJPY",
+    "CADJPY", "NZDJPY", "CHFJPY",
+}
 
 
 def _build_url(symbol: str, dt: datetime) -> str:
-    """Construieste URL bi5 pentru o ora specifica."""
     return (
         f"https://datafeed.dukascopy.com/datafeed/{symbol}/"
         f"{dt.year}/{dt.month - 1:02d}/{dt.day:02d}/{dt.hour:02d}h_ticks.bi5"
@@ -29,7 +35,6 @@ def _build_url(symbol: str, dt: datetime) -> str:
 
 
 def _fetch_hour(symbol: str, dt: datetime) -> list:
-    """Descarca si decodeaza tick-urile dintr-o ora. Returneaza lista (ts_ms, price)."""
     url = _build_url(symbol, dt)
     hour_ts_ms = int(dt.replace(minute=0, second=0, microsecond=0).timestamp() * 1000)
     divisor = 1000.0 if symbol in JPY_PAIRS else 100000.0
@@ -39,9 +44,7 @@ def _fetch_hour(symbol: str, dt: datetime) -> list:
         if resp.status_code != 200 or len(resp.content) < 10:
             return []
 
-        # Decomprima LZMA (nu zlib!)
         raw = lzma.decompress(resp.content)
-
         ticks = []
         record_size = 20
         for i in range(0, len(raw) - record_size + 1, record_size):
@@ -49,11 +52,9 @@ def _fetch_hour(symbol: str, dt: datetime) -> list:
             ms_offset, ask_raw, bid_raw = struct.unpack(">III", chunk[:12])
             price = bid_raw / divisor
             ticks.append((hour_ts_ms + ms_offset, price))
-
         return ticks
 
-    except lzma.LZMAError as e:
-        logger.warning(f"{symbol} LZMA decompress eroare: {e}")
+    except lzma.LZMAError:
         return []
     except Exception as e:
         logger.warning(f"{symbol} fetch eroare: {e}")
@@ -61,14 +62,11 @@ def _fetch_hour(symbol: str, dt: datetime) -> list:
 
 
 def _ticks_to_ohlc(ticks: list, n_candles: int) -> pd.DataFrame:
-    """Converteste tick-uri in lumânări M1 OHLC."""
     if not ticks:
         return pd.DataFrame()
-
     df = pd.DataFrame(ticks, columns=["ts_ms", "close"])
     df["ts"] = pd.to_datetime(df["ts_ms"], unit="ms", utc=True)
     df = df.set_index("ts").sort_index()
-
     ohlc = df["close"].resample("1min").ohlc().dropna()
     return ohlc.tail(n_candles)
 
@@ -86,12 +84,13 @@ def get_ohlcv(symbol: str, n_candles: int = 120):
     now_utc = datetime.now(timezone.utc)
     t0 = time.time()
 
-    # Fetch ultimele 3 ore pentru a acumula 120+ bare M1
     all_ticks = []
-    for hours_back in range(2, -1, -1):  # ora -2, -1, curenta
+    for hours_back in range(4, -1, -1):
         target_dt = now_utc - timedelta(hours=hours_back)
         ticks = _fetch_hour(duka_sym, target_dt)
         all_ticks.extend(ticks)
+        if len(all_ticks) > 8000:
+            break
 
     latency = time.time() - t0
     df = _ticks_to_ohlc(all_ticks, n_candles)
