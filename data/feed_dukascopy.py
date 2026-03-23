@@ -1,58 +1,71 @@
-"""
-data/feed_dukascopy.py — Feed date Dukascopy M1/M5
-"""
 import time
+import requests
 import pandas as pd
-import numpy as np
 from loguru import logger
-from config import MAX_FETCH_LATENCY_SEC
 
-try:
-    from dukascopy import Dukascopy
-    _DC = Dukascopy()
-    _HAS_DC = True
-except Exception:
-    _DC = None
-    _HAS_DC = False
-    logger.warning("dukascopy-python indisponibil. Date simulate.")
+DUKA_URL = "https://freeserv.dukascopy.com/2.0/index.php"
 
-_TIMEFRAME_MAP = {"M1":"m1","M5":"m5","M15":"m15","H1":"h1"}
+SYMBOL_MAP = {
+    "EURUSD": "EUR/USD", "GBPUSD": "GBP/USD", "USDJPY": "USD/JPY",
+    "USDCHF": "USD/CHF", "AUDUSD": "AUD/USD", "USDCAD": "USD/CAD",
+    "NZDUSD": "NZD/USD", "EURGBP": "EUR/GBP", "EURJPY": "EUR/JPY",
+    "EURAUD": "EUR/AUD", "EURCAD": "EUR/CAD", "EURNZD": "EUR/NZD",
+    "EURCHF": "EUR/CHF", "GBPJPY": "GBP/JPY", "GBPAUD": "GBP/AUD",
+    "GBPCAD": "GBP/CAD", "GBPNZD": "GBP/NZD", "GBPCHF": "GBP/CHF",
+    "AUDJPY": "AUD/JPY", "AUDNZD": "AUD/NZD", "AUDCAD": "AUD/CAD",
+    "NZDJPY": "NZD/JPY", "CADJPY": "CAD/JPY",
+}
 
-def _make_mock(symbol: str, n: int) -> pd.DataFrame:
-    rng   = np.random.default_rng(hash(symbol) % (2**32))
-    price = 1.1000 if "EUR" in symbol else (150.0 if "JPY" in symbol else 1.2500)
-    ret   = rng.normal(0, 0.0003, n)
-    close = price * np.exp(np.cumsum(ret))
-    atr   = np.abs(rng.normal(0, 0.0005, n)) + 0.0002
-    return pd.DataFrame({
-        "open":close*(1-atr/2),"high":close+atr,
-        "low":close-atr,"close":close,
-        "volume":rng.integers(100,2000,n).astype(float),
-        "spread":atr*0.1,
-    })
 
-def get_ohlcv(symbol: str, n_candles: int = 120, timeframe: str = "M1") -> tuple:
+def get_ohlcv(symbol: str, n_candles: int = 120):
+    instrument = SYMBOL_MAP.get(symbol, symbol)
+    params = {
+        "path":           "chart/json",
+        "instrument":     instrument,
+        "offer_side":     "B",
+        "interval":       "1MIN",
+        "splits":         "true",
+        "time_direction": "P",
+        "timestamp":      int(time.time() * 1000),
+        "count":          n_candles,
+    }
+
     t0 = time.time()
-    if not _HAS_DC:
-        return _make_mock(symbol, n_candles), 0.0, False
     try:
-        tf  = _TIMEFRAME_MAP.get(timeframe.upper(), "m1")
-        raw = _DC.get_candles(instrument=symbol, offer_side="BID", interval=tf, n_last=n_candles)
+        resp = requests.get(DUKA_URL, params=params, timeout=5)
         latency = time.time() - t0
-        if latency > MAX_FETCH_LATENCY_SEC:
-            logger.warning(f"[{symbol}] Latenta {latency:.2f}s.")
+
+        if resp.status_code != 200 or not resp.text.strip():
+            logger.warning(f"{symbol} HTTP {resp.status_code}. SKIP.")
             return pd.DataFrame(), latency, False
-        df = pd.DataFrame(raw)
-        df.columns = [c.lower() for c in df.columns]
-        col_map = {"askclose":"close","askhigh":"high","asklow":"low","askopen":"open",
-                   "bidclose":"close","bidhigh":"high","bidlow":"low","bidopen":"open"}
-        df = df.rename(columns=col_map)
-        for col in ["open","high","low","close","volume"]:
-            if col not in df.columns:
-                df[col] = df.get("close", 1.0)
-        if "spread" not in df.columns:
-            df["spread"] = (df["high"] - df["low"]) * 0.15
-        return df.dropna(subset=["close"]).reset_index(drop=True), latency, True
+
+        data = resp.json()
+        if not data or len(data) < 10:
+            logger.warning(f"{symbol} Date insuficiente ({len(data)} bare). SKIP.")
+            return pd.DataFrame(), latency, False
+
+        df = pd.DataFrame(
+            data,
+            columns=["timestamp", "open", "high", "low", "close", "volume"]
+        )
+        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+        df = df.set_index("timestamp")
+        for col in ["open", "high", "low", "close", "volume"]:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        df = df.dropna()
+
+        if latency > 5.0:
+            logger.warning(f"{symbol} Fetch latency={latency:.1f}s >5.0s. SKIP.")
+            return pd.DataFrame(), latency, False
+
+        logger.debug(f"{symbol} {len(df)} lumânări M1 | Latency={latency:.2f}s")
+        return df, latency, True
+
+    except requests.exceptions.Timeout:
+        latency = time.time() - t0
+        logger.warning(f"{symbol} Timeout dupa {latency:.1f}s. SKIP.")
+        return pd.DataFrame(), latency, False
     except Exception as e:
-        logger.error(f"[{symbol}] Feed error: {e}")
-        return pd.DataFrame(), time.time()-t0, False
+        latency = time.time() - t0
+        logger.error(f"{symbol} Eroare fetch: {e}")
+        return pd.DataFrame(), latency, False
