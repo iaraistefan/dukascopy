@@ -1,21 +1,14 @@
 import time
+import os
 import requests
 import pandas as pd
 from loguru import logger
 
-DUKA_URL = "https://freeserv.dukascopy.com/2.0/index.php"
+# Ia cheia din .env: TWELVEDATA_API_KEY=cheia_ta
+API_KEY  = os.getenv("TWELVEDATA_API_KEY", "demo")
+BASE_URL = "https://api.twelvedata.com/time_series"
 
-HEADERS = {
-    "User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                       "AppleWebKit/537.36 (KHTML, like Gecko) "
-                       "Chrome/122.0.0.0 Safari/537.36",
-    "Accept":          "application/json, text/javascript, */*; q=0.01",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Referer":         "https://www.dukascopy.com/trading-tools/widgets/charts/online_chart",
-    "Origin":          "https://www.dukascopy.com",
-    "Connection":      "keep-alive",
-}
-
+# Format Twelve Data pentru Forex
 SYMBOL_MAP = {
     "EURUSD": "EUR/USD", "GBPUSD": "GBP/USD", "USDJPY": "USD/JPY",
     "USDCHF": "USD/CHF", "AUDUSD": "AUD/USD", "USDCAD": "USD/CAD",
@@ -27,50 +20,47 @@ SYMBOL_MAP = {
     "NZDJPY": "NZD/JPY", "CADJPY": "CAD/JPY",
 }
 
-SESSION = requests.Session()
-SESSION.headers.update(HEADERS)
-
 
 def get_ohlcv(symbol: str, n_candles: int = 120):
     instrument = SYMBOL_MAP.get(symbol, symbol)
     params = {
-        "path":           "chart/json",
-        "instrument":     instrument,
-        "offer_side":     "B",
-        "interval":       "1MIN",
-        "splits":         "true",
-        "time_direction": "P",
-        "timestamp":      int(time.time() * 1000),
-        "count":          n_candles,
+        "symbol":    instrument,
+        "interval":  "1min",
+        "outputsize": min(n_candles, 120),
+        "apikey":    API_KEY,
+        "format":    "JSON",
     }
 
     t0 = time.time()
     try:
-        resp = SESSION.get(DUKA_URL, params=params, timeout=8)
+        resp = requests.get(BASE_URL, params=params, timeout=8)
         latency = time.time() - t0
 
-        if resp.status_code == 403:
-            logger.warning(f"{symbol} HTTP 403 (IP blocat). SKIP.")
-            return pd.DataFrame(), latency, False
-
-        if resp.status_code != 200 or not resp.text.strip():
-            logger.warning(f"{symbol} HTTP {resp.status_code}. SKIP.")
+        if resp.status_code != 200:
+            logger.warning(f"{symbol} TwelveData HTTP {resp.status_code}. SKIP.")
             return pd.DataFrame(), latency, False
 
         data = resp.json()
-        if not data or len(data) < 10:
-            logger.warning(f"{symbol} Date insuficiente ({len(data)} bare). SKIP.")
+
+        # Rate limit atins
+        if data.get("status") == "error":
+            msg = data.get("message", "unknown")
+            logger.warning(f"{symbol} TwelveData eroare: {msg}. SKIP.")
             return pd.DataFrame(), latency, False
 
-        df = pd.DataFrame(
-            data,
-            columns=["timestamp", "open", "high", "low", "close", "volume"]
-        )
-        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
-        df = df.set_index("timestamp")
+        values = data.get("values", [])
+        if len(values) < 10:
+            logger.warning(f"{symbol} TwelveData: {len(values)} bare. SKIP.")
+            return pd.DataFrame(), latency, False
+
+        df = pd.DataFrame(values)
+        df["datetime"] = pd.to_datetime(df["datetime"])
+        df = df.set_index("datetime")
         for col in ["open", "high", "low", "close", "volume"]:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-        df = df.dropna()
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+        df = df[["open", "high", "low", "close"]].dropna()
+        df = df.sort_index()  # ordine cronologica
 
         if latency > 5.0:
             logger.warning(f"{symbol} Latency={latency:.1f}s >5.0s. SKIP.")
@@ -81,9 +71,9 @@ def get_ohlcv(symbol: str, n_candles: int = 120):
 
     except requests.exceptions.Timeout:
         latency = time.time() - t0
-        logger.warning(f"{symbol} Timeout dupa {latency:.1f}s. SKIP.")
+        logger.warning(f"{symbol} Timeout {latency:.1f}s. SKIP.")
         return pd.DataFrame(), latency, False
     except Exception as e:
         latency = time.time() - t0
-        logger.error(f"{symbol} Eroare fetch: {e}")
+        logger.error(f"{symbol} Eroare: {e}")
         return pd.DataFrame(), latency, False
