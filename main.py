@@ -85,32 +85,32 @@ def process_symbol(symbol: str):
     conf, stab, rsi_c = compute_confluence_score(df, direction)
 
     c = {
-        "symbol":          symbol,
-        "direction":       direction,
-        "prob":            signal["prob"],
-        "delta":           best_d,
-        "expiry_score":    best_s,
-        "target_level":    signal.get("target_level"),
-        "dist_atr":        signal.get("dist_atr", 0.0),
-        "hurst":           h,
-        "regime":          regime,
-        "drift_dir":       drift,
-        "atr_ratio":       atr_r,
-        "n_candles":       len(df),
-        "is_real_data":    is_real,
-        "fetch_latency":   latency,
-        "source":          src,
-        "regime_ok":       reg_ok,
-        "regime_reason":   reg_reason,
+        "symbol":           symbol,
+        "direction":        direction,
+        "prob":             signal["prob"],
+        "delta":            best_d,
+        "expiry_score":     best_s,
+        "target_level":     signal.get("target_level"),
+        "dist_atr":         signal.get("dist_atr", 0.0),
+        "hurst":            h,
+        "regime":           regime,
+        "drift_dir":        drift,
+        "atr_ratio":        atr_r,
+        "n_candles":        len(df),
+        "is_real_data":     is_real,
+        "fetch_latency":    latency,
+        "source":           src,
+        "regime_ok":        reg_ok,
+        "regime_reason":    reg_reason,
         "confluence_score": conf,
-        "stability_score": stab,
+        "stability_score":  stab,
         "rsi_confirmation": rsi_c,
         "spread_atr_ratio": spr_atr,
-        "pf_ok":           pf_ok,
-        "pf_reason":       pf_reason,
-        "entry_price":     float(df["close"].iloc[-1]),
-        "mu":              signal.get("mu", 0),
-        "sigma":           signal.get("sigma", 0),
+        "pf_ok":            pf_ok,
+        "pf_reason":        pf_reason,
+        "entry_price":      float(df["close"].iloc[-1]),
+        "mu":               signal.get("mu", 0),
+        "sigma":            signal.get("sigma", 0),
     }
     c["rank_score"] = compute_rank_score(c)
     logger.success(
@@ -123,25 +123,21 @@ def process_symbol(symbol: str):
 async def emit_signal(w: dict):
     sym, dir_ = w["symbol"], w["direction"]
 
-    # ── MTF filter ────────────────────────────────────────────────────────────
     mtf_ok, mtf_r = is_mtf_aligned(sym, dir_)
     w["mtf_trend"] = mtf_r
     if not mtf_ok:
         logger.info(f"[{sym}] MTF FAIL: {mtf_r}")
         return
 
-    # ── News filter ───────────────────────────────────────────────────────────
     news_ok, news_r = is_news_safe(sym)
     if not news_ok:
         logger.info(f"[{sym}] NEWS BLOCK: {news_r}")
         return
 
-    # ── Calcul entry time fix (LEAD_TIME_SEC secunde in viitor) ───────────────
-    entry_dt           = datetime.now(timezone.utc) + timedelta(seconds=LEAD_TIME_SEC)
+    entry_dt            = datetime.now(timezone.utc) + timedelta(seconds=LEAD_TIME_SEC)
     w["entry_time_str"] = entry_dt.strftime("%H:%M:%S UTC")
     w["entry_time_dt"]  = entry_dt
 
-    # ── Trimite semnal pe Telegram ────────────────────────────────────────────
     await send_signal(w)
     gate.record_emit(sym)
 
@@ -150,21 +146,19 @@ async def emit_signal(w: dict):
         f"Entry={w['entry_price']:.5f} | Intrare la {w['entry_time_str']}"
     )
 
-    # ── Programeaza verificare WIN/LOSS ───────────────────────────────────────
-    # Asteapta pana la intrare + delta minute + 10 sec buffer
-    wait_to_entry = LEAD_TIME_SEC
-    await checker.schedule_check(w, w["entry_price"], extra_wait=wait_to_entry)
+    await checker.schedule_check(w, w["entry_price"], extra_wait=LEAD_TIME_SEC)
 
 
 async def main_loop():
-    logger.info(f"Forex Radar v4 | {len(SYMBOLS)} simboluri | Lead time {LEAD_TIME_SEC}s")
-    await send_text(
-        f"Forex Radar Bot v4 pornit!
-"
-        f"Scanez {len(SYMBOLS)} perechi Dukascopy.
-"
-        f"Lead time: {LEAD_TIME_SEC} secunde inainte de intrare."
+    n = len(SYMBOLS)
+    logger.info(f"Forex Radar v4 | {n} simboluri | Lead time {LEAD_TIME_SEC}s")
+
+    start_msg = (
+        "Forex Radar Bot v4 pornit! "
+        + str(n) + " perechi Dukascopy. "
+        + "Lead time: " + str(LEAD_TIME_SEC) + " secunde inainte de intrare."
     )
+    await send_text(start_msg)
 
     while True:
         t0 = time.time()
