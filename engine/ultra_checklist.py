@@ -1,6 +1,5 @@
 """
-engine/ultra_checklist.py — Checklist 15 condiții (Ultra Premium + Research)
-Corectat: Compatibilitate cu modelul OU și validare latență rețea.
+engine/ultra_checklist.py — Checklist 15 condiții (Ultra Premium + Slippage Shield)
 """
 
 from loguru import logger
@@ -9,17 +8,18 @@ from config import (
     ATR_RATIO_MIN, ATR_RATIO_MAX, MIN_CANDLES_REQUIRED,
     MIN_WIN_PROBABILITY, MAX_FETCH_LATENCY_SEC,
     MIN_STABILITY_SCORE, MAX_SPREAD_ATR_RATIO,
+    MIN_ATR_PIPS, SLIPPAGE_BUFFER_PIPS
 )
 
 def is_ultra_premium_signal(
     n_candles: int,
     is_real_data: bool,
     fetch_latency: float,
-    hurst_value: float,
+    hurst: float,
     regime: str,
-    regime_compatible: bool,
+    regime_ok: bool,
     regime_reason: str,
-    fpt_prob: float,  # Primeste probabilitatea atat de la FPT cat si de la OU
+    prob: float,
     dist_atr: float,
     expiry_score: float,
     atr_ratio: float,
@@ -27,26 +27,23 @@ def is_ultra_premium_signal(
     spread_atr_ratio: float,
     session_allowed: bool,
     session_reason: str,
-    symbol_allowed: bool,
-    symbol_pf_reason: str,
+    pf_ok: bool,
+    pf_reason: str,
     cooldown_ok: bool,
     is_rank_1: bool,
-    symbol: str = "",
+    symbol: str,
+    entry_price: float,
+    target_level: float = None,
     confluence_score: float = 0.0,
-    rsi_confirmation: float = 0.0,
     **kwargs,
 ) -> tuple[bool, list[str]]:
-    """
-    Verifică toate condițiile Ultra Premium înainte de a emite semnalul.
-    Returnează (passed: bool, fails: list[str]).
-    """
+    
     fails = []
 
-    # C1: Date reale (nu simulate)
-    if not is_real_data:
-        fails.append("C1: date_mock")
+    # C1: Date reale
+    if not is_real_data: fails.append("C1: date_mock")
 
-    # C1.1: Latența datelor (NOU - previne intrări întârziate)
+    # C1.1: Latența datelor 
     if fetch_latency > MAX_FETCH_LATENCY_SEC:
         fails.append(f"C1.1: latency={fetch_latency:.1f}s > {MAX_FETCH_LATENCY_SEC}s")
 
@@ -54,68 +51,83 @@ def is_ultra_premium_signal(
     if n_candles < MIN_CANDLES_REQUIRED:
         fails.append(f"C2: candles={n_candles} < {MIN_CANDLES_REQUIRED}")
 
-    # C3: Regim compatibil cu direcția semnalului
-    if not regime_compatible:
+    # C3: Regim compatibil
+    if not regime_ok:
         fails.append(f"C3: {regime_reason}")
 
-    # C4: Regim ≠ random (H între 0.42-0.58)
+    # C4: Evităm piețele aleatorii
     if regime == "random":
-        fails.append(f"C4: regim_random_H={hurst_value:.3f}")
+        fails.append(f"C4: regim_random_H={hurst:.3f}")
 
-    # C5: Distanță față de S/R >= 0.5 ATR
+    # C5: Distanță relativă față de S/R
     if dist_atr < MIN_SR_DISTANCE_ATR:
-        fails.append(f"C5: dist={dist_atr:.2f} < {MIN_SR_DISTANCE_ATR}")
+        fails.append(f"C5: dist_atr={dist_atr:.2f} < {MIN_SR_DISTANCE_ATR}")
 
-    # C6: Probabilitate minimă (Bug Fix: adaptează pragul în funcție de regim)
+    # C6: Probabilitate Matematică (Model Dinamic)
     min_req_prob = MIN_WIN_PROBABILITY if regime == "mean_reversion" else MIN_FPT_PROB
-    if fpt_prob < min_req_prob:
-        fails.append(f"C6: prob={fpt_prob:.3f} < {min_req_prob}")
+    if prob < min_req_prob:
+        fails.append(f"C6: prob={prob:.3f} < {min_req_prob}")
 
-    # C7: Scor expiry optimizer >= prag minim
+    # C7: Scor Expiry Optimizer
     if expiry_score < MIN_FINAL_SCORE:
-        fails.append(f"C7: score={expiry_score:.4f} < {MIN_FINAL_SCORE}")
+        fails.append(f"C7: score_exp={expiry_score:.4f} < {MIN_FINAL_SCORE}")
 
-    # C8: ATR ratio în bandă sănătoasă (evităm piețele moarte sau prea volatile)
+    # C8: ATR ratio în bandă sănătoasă
     if atr_ratio < ATR_RATIO_MIN or atr_ratio > ATR_RATIO_MAX:
         fails.append(f"C8: atr_ratio={atr_ratio:.2f} out_of_band")
 
-    # C9: Cooldown global respectat (fără spam de semnale)
-    if not cooldown_ok:
-        fails.append("C9: cooldown_activ")
+    # C9: Cooldown global
+    if not cooldown_ok: fails.append("C9: cooldown_activ")
 
-    # C10: Rank #1 din ciclu
-    if not is_rank_1:
-        fails.append("C10: nu_rank_1")
+    # C10: Rank #1
+    if not is_rank_1: fails.append("C10: nu_rank_1")
 
-    # C11: Stability Score >= prag (trend curat, fără spike-uri)
+    # C11: Stability Score
     if stability_score < MIN_STABILITY_SCORE:
         fails.append(f"C11: stability={stability_score:.3f} < {MIN_STABILITY_SCORE}")
 
-    # C12: Spread filter — spread < 50% ATR (costul tranzacției)
+    # C12: Spread filter
     if spread_atr_ratio > MAX_SPREAD_ATR_RATIO:
         fails.append(f"C12: spread={spread_atr_ratio:.3f} > {MAX_SPREAD_ATR_RATIO}")
 
-    # C13: Session filter — sesiune activă (ore de tranzacționare)
-    if not session_allowed:
-        fails.append(f"C13: {session_reason}")
+    # C13: Session filter
+    if not session_allowed: fails.append(f"C13: {session_reason}")
 
-    # C14: Performance tracker — pereche ne-suspendată (win rate decent)
-    if not symbol_allowed:
-        fails.append(f"C14: {symbol_pf_reason}")
+    # C14: Performance tracker
+    if not pf_ok: fails.append(f"C14: {pf_reason}")
+
+    # ─── C15: SLIPPAGE SHIELD & VOLATILITY CHECK ──────────────────────────────
+    if target_level is not None and dist_atr > 0:
+        # Determinam dinamica perechii (0.01 pt JPY, 0.0001 pt restul)
+        pip_size = 0.01 if entry_price > 20 else 0.0001
+        
+        # Distanța absolută până la bariera vizată
+        dist_abs = abs(target_level - entry_price)
+        dist_pips = dist_abs / pip_size
+        
+        # Extragem ATR-ul absolut (în pips) din formula distanței
+        atr_c_pips = (dist_abs / dist_atr) / pip_size
+        
+        # 15.1: Protecție piață moartă (Volatilitate minusculă)
+        if atr_c_pips < MIN_ATR_PIPS:
+            fails.append(f"C15.1: dead_market (ATR={atr_c_pips:.1f}p < {MIN_ATR_PIPS}p)")
+            
+        # 15.2: Buffer-ul de Slippage (Mișcarea nu acoperă posibila execuție proastă a brokerului)
+        if dist_pips < SLIPPAGE_BUFFER_PIPS:
+            fails.append(f"C15.2: slippage_risk (Dist={dist_pips:.1f}p < {SLIPPAGE_BUFFER_PIPS}p)")
 
     passed = len(fails) == 0
 
     if not passed:
         logger.debug(
-            f"[{symbol}] Checklist FAIL ({len(fails)} issues): "
-            f"{' | '.join(fails[:4])}"
+            f"[{symbol}] Checklist FAIL ({len(fails)}): "
+            f"{' | '.join(fails[:3])}"
         )
     else:
-        logger.info(
-            f"[{symbol}] ✅ Checklist PASS "
-            f"P={fpt_prob:.3f} D={dist_atr:.2f}ATR "
-            f"S={expiry_score:.4f} Stab={stability_score:.3f} "
-            f"Conf={confluence_score:.3f}"
+        logger.success(
+            f"[{symbol}] \u2694\ufe0f ULTRA PASS \u2694\ufe0f "
+            f"P={prob:.3f} Dist={dist_pips:.1f}pips "
+            f"(ATR={atr_c_pips:.1f}p) Stab={stability_score:.3f}"
         )
 
     return passed, fails
