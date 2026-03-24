@@ -33,6 +33,9 @@ def is_mtf_aligned(symbol, direction, df_m1=None):
         aligned = trend in ("up", "flat")
     else:
         aligned = trend in ("down", "flat")
-    if not aligned:
-        logger.debug(symbol + " MTF nealiniat: " + direction + " vs " + trend)
-    return aligned
+    if aligned:
+        reason = "MTF OK: " + trend + " aligns " + direction
+    else:
+        reason = "MTF FAIL: " + trend + " vs " + direction
+    logger.debug(symbol + " " + reason)
+    return aligned, reason
