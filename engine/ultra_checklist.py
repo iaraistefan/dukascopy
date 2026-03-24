@@ -1,3 +1,7 @@
+"""
+engine/ultra_checklist.py — Checklist 14 condiții (Ultra Premium + Research)
+"""
+
 from loguru import logger
 from config import (
     MIN_FPT_PROB, MIN_FINAL_SCORE, MIN_SR_DISTANCE_ATR,
@@ -28,60 +32,86 @@ def is_ultra_premium_signal(
     cooldown_ok: bool,
     is_rank_1: bool,
     symbol: str = "",
+    confluence_score: float = 0.0,
+    rsi_confirmation: float = 0.0,
+    **kwargs,
 ) -> tuple[bool, list[str]]:
+    """
+    Verifică toate cele 14 condiții Ultra Premium.
+    Returnează (passed: bool, fails: list[str]).
+    """
 
     fails = []
 
+    # C1: Date reale (nu simulate)
     if not is_real_data:
         fails.append("C1: date_mock")
 
+    # C2: Lumânări suficiente
     if n_candles < MIN_CANDLES_REQUIRED:
         fails.append(f"C2: candles={n_candles}<{MIN_CANDLES_REQUIRED}")
 
+    # C3: Regim compatibil cu direcția semnalului
     if not regime_compatible:
         fails.append(f"C3: {regime_reason}")
 
+    # C4: Regim ≠ random (H între 0.42-0.58)
     if regime == "random":
         fails.append(f"C4: regim_random_H={hurst_value:.3f}")
 
+    # C5: Distanță față de S/R >= 0.5 ATR
     if dist_atr < MIN_SR_DISTANCE_ATR:
         fails.append(f"C5: dist={dist_atr:.2f}<{MIN_SR_DISTANCE_ATR}")
 
+    # C6: Probabilitate FPT >= prag minim
     if fpt_prob < MIN_FPT_PROB:
         fails.append(f"C6: prob={fpt_prob:.3f}<{MIN_FPT_PROB}")
 
+    # C7: Scor expiry optimizer >= prag minim
     if expiry_score < MIN_FINAL_SCORE:
         fails.append(f"C7: score={expiry_score:.4f}<{MIN_FINAL_SCORE}")
 
+    # C8: ATR ratio în bandă sănătoasă
     if atr_ratio < ATR_RATIO_MIN or atr_ratio > ATR_RATIO_MAX:
-        fails.append(f"C8: atr_ratio={atr_ratio:.2f}")
+        fails.append(f"C8: atr_ratio={atr_ratio:.2f} out_of_band")
 
+    # C9: Cooldown global respectat
     if not cooldown_ok:
         fails.append("C9: cooldown_activ")
 
+    # C10: Rank #1 din ciclu
     if not is_rank_1:
         fails.append("C10: nu_rank_1")
 
+    # C11: Stability Score >= prag
     if stability_score < MIN_STABILITY_SCORE:
         fails.append(f"C11: stability={stability_score:.3f}<{MIN_STABILITY_SCORE}")
 
+    # C12: Spread filter — spread < 50% ATR
     if spread_atr_ratio > MAX_SPREAD_ATR_RATIO:
-        fails.append(f"C12: spread_atr={spread_atr_ratio:.3f}>{MAX_SPREAD_ATR_RATIO}")
+        fails.append(f"C12: spread={spread_atr_ratio:.3f}>{MAX_SPREAD_ATR_RATIO}")
 
+    # C13: Session filter — sesiune activă
     if not session_allowed:
         fails.append(f"C13: {session_reason}")
 
+    # C14: Performance tracker — pereche ne-suspendată
     if not symbol_allowed:
         fails.append(f"C14: {symbol_pf_reason}")
 
     passed = len(fails) == 0
 
     if not passed:
-        logger.debug(f"[{symbol}] Checklist FAIL ({len(fails)}): {' | '.join(fails[:3])}")
+        logger.debug(
+            f"[{symbol}] Checklist FAIL ({len(fails)}): "
+            f"{' | '.join(fails[:4])}"
+        )
     else:
         logger.info(
-            f"[{symbol}] Checklist PASS (14/14) P={fpt_prob:.3f} "
-            f"D={dist_atr:.2f} S={expiry_score:.4f} Stab={stability_score:.3f}"
+            f"[{symbol}] ✅ Checklist PASS (14/14) "
+            f"P={fpt_prob:.3f} D={dist_atr:.2f}ATR "
+            f"S={expiry_score:.4f} Stab={stability_score:.3f} "
+            f"Conf={confluence_score:.3f}"
         )
 
     return passed, fails
