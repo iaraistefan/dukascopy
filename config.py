@@ -29,7 +29,7 @@ CANDLES_REQUIRED = 120
 DATA_SOURCE           = "dukascopy"
 MIN_CANDLES_REQUIRED  = 100
 
-# Sincronizat cu noul timeout din feed_dukascopy.py (era 10.0)
+# Sincronizat cu noul timeout din feed_dukascopy.py
 MAX_FETCH_LATENCY_SEC = 15.0
 
 ATR_PERIOD        = 14
@@ -102,5 +102,8 @@ PF_LOOKBACK_SIGNALS     = 50
 
 # ── Lead Time ────────────────────────────────────────────────────────────────
 # Semnalul este trimis cu LEAD_TIME_SEC secunde INAINTE de intrare.
-# La 90 sec: "Intrare la 20:15:30 UTC" — ai timp sa deschizi pozitia.
 LEAD_TIME_SEC = 90
+
+# ── Filtre de Protecție Broker (Slippage & Volatilitate) ────────────────────
+MIN_ATR_PIPS         = 1.5  # Evitam pietele complet moarte
+SLIPPAGE_BUFFER_PIPS = 2.5  # Miscarea trebuie sa acopere spread-ul si slippage-ul
