@@ -9,12 +9,12 @@ try:
     _TG = True
 except ImportError:
     _TG = False
-    logger.warning("python-telegram-bot indisponibil.")
-
+    logger.warning("python-telegram-bot indisponibil. Instaleaza cu: pip install python-telegram-bot")
 
 async def send_signal(c: dict):
-    if not _TG or not TELEGRAM_BOT_TOKEN:
+    if not _TG or not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
+        
     e          = "\U0001f7e2" if c["direction"] == "CALL" else "\U0001f534"
     arrow      = "\u2b06\ufe0f CALL" if c["direction"] == "CALL" else "\u2b07\ufe0f PUT"
     entry_time = c.get("entry_time_str", "imediat")
@@ -39,43 +39,49 @@ async def send_signal(c: dict):
         f"\U0001f4c9 Trend M5: {trend_str} | RS: {rs_str}\n"
         f"\n<b>\u26a0\ufe0f Deschide pozitia EXACT la {entry_time}!</b>"
     )
+    
     try:
-        await Bot(token=TELEGRAM_BOT_TOKEN).send_message(
-            chat_id=TELEGRAM_CHAT_ID, text=msg, parse_mode="HTML"
-        )
+        # Folosim async with pentru a deschide si inchide curat sesiunea HTTP
+        async with Bot(token=TELEGRAM_BOT_TOKEN) as bot:
+            await bot.send_message(
+                chat_id=TELEGRAM_CHAT_ID, text=msg, parse_mode="HTML"
+            )
         logger.info(f"[{symbol}] TG semnal trimis OK -> intrare {entry_time}")
     except Exception as ex:
-        logger.error(f"TG send_signal: {ex}")
+        logger.error(f"TG send_signal error: {ex}")
 
-
-async def send_result(symbol, direction, win, entry, exit_, delta,
-                      win_rate, wins, losses):
-    if not _TG or not TELEGRAM_BOT_TOKEN:
+async def send_result(symbol, direction, win, entry, exit_, delta, win_rate, wins, losses):
+    if not _TG or not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
+        
     emoji  = "\u2705" if win else "\u274c"
     result = "WIN" if win else "LOSS"
     arrow  = "\u2b06\ufe0f CALL" if direction == "CALL" else "\u2b07\ufe0f PUT"
+    
     msg = (
         f"{emoji} <b>REZULTAT: {result}</b>\n"
         f"\U0001f4b1 {symbol} | {arrow}\n"
         f"\U0001f4c8 Entry: <code>{entry:.5f}</code> \u2192 <code>{exit_:.5f}</code>\n"
         f"\u23f1 {delta} min | \U0001f4ca WR: <b>{win_rate:.1%}</b> ({wins}W/{losses}L)"
     )
+    
     try:
-        await Bot(token=TELEGRAM_BOT_TOKEN).send_message(
-            chat_id=TELEGRAM_CHAT_ID, text=msg, parse_mode="HTML"
-        )
+        async with Bot(token=TELEGRAM_BOT_TOKEN) as bot:
+            await bot.send_message(
+                chat_id=TELEGRAM_CHAT_ID, text=msg, parse_mode="HTML"
+            )
     except Exception as ex:
-        logger.error(f"TG send_result: {ex}")
-
+        logger.error(f"TG send_result error: {ex}")
 
 async def send_text(text: str):
-    if not _TG or not TELEGRAM_BOT_TOKEN:
-        logger.info(f"[TG] {text}")
+    if not _TG or not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        logger.info(f"[TG MOCK] {text}")
         return
+        
     try:
-        await Bot(token=TELEGRAM_BOT_TOKEN).send_message(
-            chat_id=TELEGRAM_CHAT_ID, text=text
-        )
+        async with Bot(token=TELEGRAM_BOT_TOKEN) as bot:
+            await bot.send_message(
+                chat_id=TELEGRAM_CHAT_ID, text=text
+            )
     except Exception as ex:
-        logger.error(f"TG send_text: {ex}")
+        logger.error(f"TG send_text error: {ex}")
