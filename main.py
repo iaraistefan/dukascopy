@@ -1,5 +1,5 @@
 """
-main.py — ORCHESTRATOR v4 | Lead Time entry timestamp
+main.py — ORCHESTRATOR v4 | Asincron & Slippage Shield Activ
 """
 import asyncio
 import time
@@ -113,6 +113,7 @@ def process_symbol(symbol: str):
         "sigma":            signal.get("sigma", 0),
     }
     c["rank_score"] = compute_rank_score(c)
+    
     logger.success(
         f"[{symbol}] {direction} D={best_d}min "
         f"P={c['prob']:.3f} RS={c['rank_score']:.4f}"
@@ -198,28 +199,13 @@ async def main_loop():
         w = selected[0]
         s_ok2, s_r2 = is_session_allowed()
 
+        # Folosim dictionary unpacking pentru flexibilitate maxima
         passed, fails = is_ultra_premium_signal(
-            n_candles         = w["n_candles"],
-            is_real_data      = w["is_real_data"],
-            fetch_latency     = w["fetch_latency"],
-            hurst_value       = w["hurst"],
-            regime            = w["regime"],
-            regime_compatible = w["regime_ok"],
-            regime_reason     = w["regime_reason"],
-            fpt_prob          = w["prob"],
-            dist_atr          = w["dist_atr"],
-            expiry_score      = w["expiry_score"],
-            atr_ratio         = w["atr_ratio"],
-            stability_score   = w["stability_score"],
-            spread_atr_ratio  = w["spread_atr_ratio"],
+            **w,
             session_allowed   = s_ok2,
             session_reason    = s_r2,
-            symbol_allowed    = w["pf_ok"],
-            symbol_pf_reason  = w["pf_reason"],
             cooldown_ok       = gate.can_emit_global(),
-            is_rank_1         = True,
-            confluence_score  = w["confluence_score"],
-            symbol            = w["symbol"],
+            is_rank_1         = True
         )
 
         if passed:
