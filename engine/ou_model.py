@@ -1,134 +1,121 @@
 """
-engine/fpt_model.py — First Passage Time v2 (fereastra 60 bare)
-Corectat matematic: Drift directional precis pentru CALL si PUT.
+engine/ou_model.py — Model Ornstein-Uhlenbeck (mean-reversion)
+Corectat matematic: Z-Score echilibrat si conversie sigma continuu.
 """
+
 import numpy as np
 import pandas as pd
 from scipy import stats
 from loguru import logger
+from config import OU_WINDOW_MIN, EXPIRY_OPTIONS, Z_SCORE_THRESHOLD, MIN_WIN_PROBABILITY
 
-from config import MIN_FPT_PROB, MIN_SR_DISTANCE_ATR, EXPIRY_OPTIONS
-from engine.fractal_sr import compute_atr
-
-def estimate_drift_vol(log_returns: np.ndarray, dt: float = 1.0) -> tuple:
-    """Estimeaza drift-ul (mu) si volatilitatea (sigma) din log returns."""
-    mu    = float(np.mean(log_returns) / dt)
-    sigma = float(np.std(log_returns, ddof=1) / np.sqrt(dt))
-    return mu, max(sigma, 1e-12)
-
-def inverse_gaussian_cdf(t: float, a: float, mu: float, sigma: float) -> float:
-    """
-    Calculeaza probabilitatea First Passage Time (FPT) folosind Inverse Gaussian CDF.
-    t: timpul disponibil (delta)
-    a: distanta logaritmica pana la bariera (suport/rezistenta)
-    mu: drift-ul directional (viteza inspre bariera)
-    sigma: volatilitatea miscarii
-    """
-    if t <= 0 or sigma <= 0 or a <= 0:
-        return 0.0
+def calibrate_ou(series: pd.Series, dt: float = 1.0) -> dict:
+    """Calibreaza parametrii OU folosind regresie liniara (Euler-Maruyama)."""
+    x_t = series.values[:-1]
+    x_tp1 = series.values[1:]
+    
+    if len(x_t) < 10:
+        return {"kappa": 0.1, "theta": 0.0, "sigma": 0.001, "half_life": 7.0}
         
-    a_s = a / sigma
-    mu_s = mu / sigma
-    sq_t = np.sqrt(t)
+    slope, intercept, _, _, _ = stats.linregress(x_t, x_tp1)
     
-    # Calcul termen 1
-    t1 = stats.norm.cdf((mu_s * t - a_s) / sq_t)
+    # Asiguram mean-reversion valid (0 < beta < 1)
+    beta = float(np.clip(slope, 0.01, 0.9999))
+    kappa = -np.log(beta) / dt
+    theta = intercept / (1 - beta)
     
-    # Calcul termen 2 (cu protectie la overflow exponential)
-    ev = 2 * mu_s * a_s
-    t2 = 0.0 if ev > 500 else np.exp(ev) * stats.norm.cdf(-(mu_s * t + a_s) / sq_t)
+    # Reziduurile regresiei reprezinta zgomotul discret
+    residuals = x_tp1 - (intercept + slope * x_t)
+    sigma_discrete = float(np.std(residuals, ddof=2))
     
-    return float(np.clip(t1 + t2, 0.0, 1.0))
+    # BUG FIX CRITIC: Conversia volatilitatii discrete in volatilitate continua
+    sigma_continuous = sigma_discrete * np.sqrt((2 * kappa) / (1 - beta**2))
+    
+    half_life = np.log(2) / kappa if kappa > 0 else 999.0
+    
+    logger.debug(
+        f"OU Calibrare: kappa={kappa:.4f} theta={theta:.6f} "
+        f"sigma_c={sigma_continuous:.6f} half_life={half_life:.2f}min"
+    )
+    
+    return {
+        "kappa": float(kappa),
+        "theta": float(theta),
+        "sigma": float(sigma_continuous),
+        "half_life": float(half_life),
+    }
 
-def run_fpt_signal(df: pd.DataFrame, sr_levels: tuple, expiry_options: list = None) -> dict | None:
-    """
-    Evalueaza probabilitatea atingerii nivelurilor de S/R folosind modelul FPT.
-    Returneaza cel mai bun semnal (dict) sau None daca nu intruneste conditiile.
-    """
+def ou_forecast(x_now: float, params: dict, delta_min: int) -> tuple[float, float]:
+    """Prognozeaza media si deviatia standard viitoare dupa delta_min minute."""
+    kappa = params["kappa"]
+    theta = params["theta"]
+    sigma = params["sigma"]
+    
+    decay = np.exp(-kappa * delta_min)
+    mean_fwd = theta + (x_now - theta) * decay
+    var_fwd = (sigma ** 2) / (2 * kappa) * (1 - np.exp(-2 * kappa * delta_min))
+    
+    return float(mean_fwd), float(np.sqrt(max(var_fwd, 1e-10)))
+
+def compute_direction_probability(x_now: float, params: dict, delta_min: int, direction: str) -> float:
+    """Calculeaza probabilitatea ca pretul sa se fi miscat favorabil la expirare."""
+    mean_fwd, std_fwd = ou_forecast(x_now, params, delta_min)
+    
+    # Vrem sa aflam P(X_fwd > X_now) pentru CALL si P(X_fwd < X_now) pentru PUT
+    if direction == "CALL":
+        prob = 1 - stats.norm.cdf(0, loc=mean_fwd - x_now, scale=std_fwd)
+    else:  # PUT
+        prob = stats.norm.cdf(0, loc=mean_fwd - x_now, scale=std_fwd)
+        
+    return float(np.clip(prob, 0.0, 1.0))
+
+def run_ou_grid_scoring(df: pd.DataFrame, expiry_options: list = None) -> dict | None:
+    """Evalueaza oportunitatile de intrare bazate pe deviatii extreme (Z-Score)."""
     if expiry_options is None:
         expiry_options = EXPIRY_OPTIONS
         
     close = df["close"]
+    window = min(OU_WINDOW_MIN, len(close) - 2)
     
-    # Calculam return-urile logaritmice pentru ultimele 60 de bare
-    log_ret = np.log(close / close.shift(1)).dropna().values[-60:]
-    if len(log_ret) < 10:
+    # Extragem componenta statica (reziduul fata de medie)
+    ema = close.ewm(span=20, adjust=False).mean()
+    resid = close - ema
+    
+    params = calibrate_ou(resid.iloc[-window:])
+    x_now = float(resid.iloc[-1])
+    
+    # BUG FIX CRITIC: Calculul Z-Score folosind deviatia standard teoretica de echilibru
+    eq_std = params["sigma"] / np.sqrt(2 * params["kappa"])
+    z_now = x_now / (eq_std + 1e-10)
+
+    if abs(z_now) < Z_SCORE_THRESHOLD:
+        logger.debug(f"OU: Z={z_now:.3f} < threshold {Z_SCORE_THRESHOLD}. Skip.")
         return None
-        
-    mu, sigma = estimate_drift_vol(log_ret)
-    
-    price_now = float(close.iloc[-1])
-    atr_now   = float(compute_atr(df).iloc[-1])
-    
-    if atr_now <= 0 or np.isnan(atr_now):
-        return None
-        
-    resistances, supports = sr_levels
+
+    direction = "CALL" if z_now < -Z_SCORE_THRESHOLD else "PUT"
     
     best = {
         "delta": None,
         "prob": 0.0,
-        "direction": None,
-        "target_level": None,
-        "mu": mu,
-        "sigma": sigma,
-        "dist_atr": 0.0
+        "direction": direction,
+        "params": params,
+        "zscore": float(z_now),
+        "dist_atr": 0.0,
     }
-    
-    # ─── EVALUARE PENTRU CALL (ATINGERE REZISTENTE) ───────────────
-    for level in resistances:
-        if level <= price_now:
-            continue
-            
-        dist_atr = (level - price_now) / atr_now
-        if dist_atr < MIN_SR_DISTANCE_ATR:
-            continue
-            
-        dist_log = np.log(level / price_now)
-        
-        for delta in expiry_options:
-            # Drift-ul trebuie să fie pozitiv (în sus). Limităm la o valoare minimă pozitivă.
-            prob = inverse_gaussian_cdf(delta, dist_log, max(mu, 1e-10), sigma)
-            
-            if prob > best["prob"]:
-                best.update({
-                    "delta": delta,
-                    "prob": prob,
-                    "direction": "CALL",
-                    "target_level": level,
-                    "dist_atr": dist_atr
-                })
-                
-    # ─── EVALUARE PENTRU PUT (ATINGERE SUPORTURI) ─────────────────
-    for level in supports:
-        if level >= price_now:
-            continue
-            
-        dist_atr = (price_now - level) / atr_now
-        if dist_atr < MIN_SR_DISTANCE_ATR:
-            continue
-            
-        dist_log = np.log(price_now / level)
-        
-        for delta in expiry_options:
-            # BUG FIX CRITIC: Pentru PUT, drift-ul in directia suportului este -mu.
-            # Daca mu e negativ (downtrend real), -mu devine pozitiv si FPT creste.
-            prob = inverse_gaussian_cdf(delta, dist_log, max(-mu, 1e-10), sigma)
-            
-            if prob > best["prob"]:
-                best.update({
-                    "delta": delta,
-                    "prob": prob,
-                    "direction": "PUT",
-                    "target_level": level,
-                    "dist_atr": dist_atr
-                })
 
-    # ─── VALIDARE FINALA ──────────────────────────────────────────
-    if best["prob"] < MIN_FPT_PROB or best["direction"] is None:
-        logger.debug(f"FPT respins: prob={best['prob']:.3f} < {MIN_FPT_PROB}")
+    # Cautam cel mai profitabil timp de expirare
+    for delta in expiry_options:
+        prob = compute_direction_probability(x_now, params, delta, direction)
+        if prob > best["prob"]:
+            best["delta"] = delta
+            best["prob"] = prob
+
+    if best["prob"] < MIN_WIN_PROBABILITY:
         return None
-        
-    logger.info(f"FPT generat: {best['direction']} D={best['delta']}min P={best['prob']:.3f} (S/R Dist: {best['dist_atr']:.2f} ATR)")
+
+    logger.info(
+        f"OU Generat: {direction} delta={best['delta']}min "
+        f"P={best['prob']:.3f} Z={z_now:.3f}"
+    )
     
     return best
