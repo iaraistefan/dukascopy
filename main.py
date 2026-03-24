@@ -84,6 +84,7 @@ def process_symbol(symbol: str):
 
     conf, stab, rsi_c = compute_confluence_score(df, direction)
 
+    # Dictionarul de date complet formatat pentru a fi desfacut (**) in checklist
     c = {
         "symbol":           symbol,
         "direction":        direction,
@@ -94,14 +95,14 @@ def process_symbol(symbol: str):
         "dist_atr":         signal.get("dist_atr", 0.0),
         "hurst":            h,
         "regime":           regime,
+        "regime_ok":        reg_ok,
+        "regime_reason":    reg_reason,
         "drift_dir":        drift,
         "atr_ratio":        atr_r,
         "n_candles":        len(df),
         "is_real_data":     is_real,
         "fetch_latency":    latency,
         "source":           src,
-        "regime_ok":        reg_ok,
-        "regime_reason":    reg_reason,
         "confluence_score": conf,
         "stability_score":  stab,
         "rsi_confirmation": rsi_c,
@@ -173,7 +174,7 @@ async def main_loop():
         candidates = []
         for symbol in SYMBOLS:
             try:
-                # Modificarea cheie: Rulam procesarea in background
+                # Procesare pe thread separat pentru a nu bloca bucla asincrona
                 r = await asyncio.to_thread(process_symbol, symbol)
                 if r:
                     candidates.append(r)
@@ -199,7 +200,7 @@ async def main_loop():
         w = selected[0]
         s_ok2, s_r2 = is_session_allowed()
 
-        # Folosim dictionary unpacking pentru flexibilitate maxima
+        # Dictionar unpacking inteligent: paseaza totul curat catre checklist
         passed, fails = is_ultra_premium_signal(
             **w,
             session_allowed   = s_ok2,
