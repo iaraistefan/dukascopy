@@ -172,7 +172,8 @@ async def main_loop():
         candidates = []
         for symbol in SYMBOLS:
             try:
-                r = process_symbol(symbol)
+                # Modificarea cheie: Rulam procesarea in background
+                r = await asyncio.to_thread(process_symbol, symbol)
                 if r:
                     candidates.append(r)
             except Exception as e:
