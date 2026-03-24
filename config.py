@@ -28,7 +28,9 @@ CANDLES_REQUIRED = 120
 
 DATA_SOURCE           = "dukascopy"
 MIN_CANDLES_REQUIRED  = 100
-MAX_FETCH_LATENCY_SEC = 10.0
+
+# Sincronizat cu noul timeout din feed_dukascopy.py (era 10.0)
+MAX_FETCH_LATENCY_SEC = 15.0
 
 ATR_PERIOD        = 14
 FRACTAL_N         = 2
