@@ -1,15 +1,15 @@
 """
-engine/ultra_checklist.py — Checklist 14 condiții (Ultra Premium + Research)
+engine/ultra_checklist.py — Checklist 15 condiții (Ultra Premium + Research)
+Corectat: Compatibilitate cu modelul OU și validare latență rețea.
 """
 
 from loguru import logger
 from config import (
     MIN_FPT_PROB, MIN_FINAL_SCORE, MIN_SR_DISTANCE_ATR,
     ATR_RATIO_MIN, ATR_RATIO_MAX, MIN_CANDLES_REQUIRED,
-    HURST_MOMENTUM_THRESHOLD, HURST_MR_THRESHOLD,
+    MIN_WIN_PROBABILITY, MAX_FETCH_LATENCY_SEC,
     MIN_STABILITY_SCORE, MAX_SPREAD_ATR_RATIO,
 )
-
 
 def is_ultra_premium_signal(
     n_candles: int,
@@ -19,7 +19,7 @@ def is_ultra_premium_signal(
     regime: str,
     regime_compatible: bool,
     regime_reason: str,
-    fpt_prob: float,
+    fpt_prob: float,  # Primeste probabilitatea atat de la FPT cat si de la OU
     dist_atr: float,
     expiry_score: float,
     atr_ratio: float,
@@ -37,19 +37,22 @@ def is_ultra_premium_signal(
     **kwargs,
 ) -> tuple[bool, list[str]]:
     """
-    Verifică toate cele 14 condiții Ultra Premium.
+    Verifică toate condițiile Ultra Premium înainte de a emite semnalul.
     Returnează (passed: bool, fails: list[str]).
     """
-
     fails = []
 
     # C1: Date reale (nu simulate)
     if not is_real_data:
         fails.append("C1: date_mock")
 
+    # C1.1: Latența datelor (NOU - previne intrări întârziate)
+    if fetch_latency > MAX_FETCH_LATENCY_SEC:
+        fails.append(f"C1.1: latency={fetch_latency:.1f}s > {MAX_FETCH_LATENCY_SEC}s")
+
     # C2: Lumânări suficiente
     if n_candles < MIN_CANDLES_REQUIRED:
-        fails.append(f"C2: candles={n_candles}<{MIN_CANDLES_REQUIRED}")
+        fails.append(f"C2: candles={n_candles} < {MIN_CANDLES_REQUIRED}")
 
     # C3: Regim compatibil cu direcția semnalului
     if not regime_compatible:
@@ -61,21 +64,22 @@ def is_ultra_premium_signal(
 
     # C5: Distanță față de S/R >= 0.5 ATR
     if dist_atr < MIN_SR_DISTANCE_ATR:
-        fails.append(f"C5: dist={dist_atr:.2f}<{MIN_SR_DISTANCE_ATR}")
+        fails.append(f"C5: dist={dist_atr:.2f} < {MIN_SR_DISTANCE_ATR}")
 
-    # C6: Probabilitate FPT >= prag minim
-    if fpt_prob < MIN_FPT_PROB:
-        fails.append(f"C6: prob={fpt_prob:.3f}<{MIN_FPT_PROB}")
+    # C6: Probabilitate minimă (Bug Fix: adaptează pragul în funcție de regim)
+    min_req_prob = MIN_WIN_PROBABILITY if regime == "mean_reversion" else MIN_FPT_PROB
+    if fpt_prob < min_req_prob:
+        fails.append(f"C6: prob={fpt_prob:.3f} < {min_req_prob}")
 
     # C7: Scor expiry optimizer >= prag minim
     if expiry_score < MIN_FINAL_SCORE:
-        fails.append(f"C7: score={expiry_score:.4f}<{MIN_FINAL_SCORE}")
+        fails.append(f"C7: score={expiry_score:.4f} < {MIN_FINAL_SCORE}")
 
-    # C8: ATR ratio în bandă sănătoasă
+    # C8: ATR ratio în bandă sănătoasă (evităm piețele moarte sau prea volatile)
     if atr_ratio < ATR_RATIO_MIN or atr_ratio > ATR_RATIO_MAX:
         fails.append(f"C8: atr_ratio={atr_ratio:.2f} out_of_band")
 
-    # C9: Cooldown global respectat
+    # C9: Cooldown global respectat (fără spam de semnale)
     if not cooldown_ok:
         fails.append("C9: cooldown_activ")
 
@@ -83,19 +87,19 @@ def is_ultra_premium_signal(
     if not is_rank_1:
         fails.append("C10: nu_rank_1")
 
-    # C11: Stability Score >= prag
+    # C11: Stability Score >= prag (trend curat, fără spike-uri)
     if stability_score < MIN_STABILITY_SCORE:
-        fails.append(f"C11: stability={stability_score:.3f}<{MIN_STABILITY_SCORE}")
+        fails.append(f"C11: stability={stability_score:.3f} < {MIN_STABILITY_SCORE}")
 
-    # C12: Spread filter — spread < 50% ATR
+    # C12: Spread filter — spread < 50% ATR (costul tranzacției)
     if spread_atr_ratio > MAX_SPREAD_ATR_RATIO:
-        fails.append(f"C12: spread={spread_atr_ratio:.3f}>{MAX_SPREAD_ATR_RATIO}")
+        fails.append(f"C12: spread={spread_atr_ratio:.3f} > {MAX_SPREAD_ATR_RATIO}")
 
-    # C13: Session filter — sesiune activă
+    # C13: Session filter — sesiune activă (ore de tranzacționare)
     if not session_allowed:
         fails.append(f"C13: {session_reason}")
 
-    # C14: Performance tracker — pereche ne-suspendată
+    # C14: Performance tracker — pereche ne-suspendată (win rate decent)
     if not symbol_allowed:
         fails.append(f"C14: {symbol_pf_reason}")
 
@@ -103,12 +107,12 @@ def is_ultra_premium_signal(
 
     if not passed:
         logger.debug(
-            f"[{symbol}] Checklist FAIL ({len(fails)}): "
+            f"[{symbol}] Checklist FAIL ({len(fails)} issues): "
             f"{' | '.join(fails[:4])}"
         )
     else:
         logger.info(
-            f"[{symbol}] ✅ Checklist PASS (14/14) "
+            f"[{symbol}] ✅ Checklist PASS "
             f"P={fpt_prob:.3f} D={dist_atr:.2f}ATR "
             f"S={expiry_score:.4f} Stab={stability_score:.3f} "
             f"Conf={confluence_score:.3f}"
